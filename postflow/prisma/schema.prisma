@@ -1,0 +1,305 @@
+// PostFlow — Schema inicial (Fase 1)
+// Cobre o modelo de dados completo do produto. As tabelas de billing (Plan,
+// Subscription) e analytics já existem no schema para a app não precisar de
+// migração quebrando compatibilidade quando essas fases forem implementadas,
+// mas nesta fase elas não são alimentadas por nenhuma integração real.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+enum SocialPlatform {
+  INSTAGRAM
+  FACEBOOK
+  LINKEDIN
+  X
+  TIKTOK
+  YOUTUBE
+}
+
+enum ConnectionStatus {
+  CONNECTED
+  RECONNECT_REQUIRED
+  DISCONNECTED
+  NOT_CONFIGURED
+}
+
+enum PostStatus {
+  DRAFT
+  SCHEDULED
+  PROCESSING
+  PUBLISHED
+  FAILED
+  CANCELLED
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+}
+
+enum PlanTier {
+  FREE
+  STARTER
+  PRO
+  AGENCY
+}
+
+enum NotificationType {
+  POST_PUBLISHED
+  POST_FAILED
+  TOKEN_EXPIRED
+  ACCOUNT_DISCONNECTED
+  API_LIMIT_REACHED
+}
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  passwordHash  String? // null quando o login é via OAuth (Auth.js)
+  avatarUrl     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  memberships   WorkspaceMember[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+}
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members       WorkspaceMember[]
+  socialAccounts SocialAccount[]
+  posts         Post[]
+  media         Media[]
+  subscription  Subscription?
+  auditLogs     AuditLog[]
+  notifications Notification[]
+
+  @@index([slug])
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        WorkspaceRole @default(EDITOR)
+  invitedAt   DateTime      @default(now())
+  joinedAt    DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+model SocialAccount {
+  id              String            @id @default(cuid())
+  workspaceId     String
+  platform        SocialPlatform
+  externalId      String // ID da conta/página na plataforma de origem
+  displayName     String
+  avatarUrl       String?
+  status          ConnectionStatus  @default(NOT_CONFIGURED)
+  lastSyncedAt    DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  token     SocialToken?
+  postLinks PostPlatform[]
+  analytics Analytics[]
+
+  @@unique([workspaceId, platform, externalId])
+  @@index([workspaceId])
+}
+
+// Tokens ficam em tabela separada e sempre criptografados em repouso
+// (accessTokenEnc / refreshTokenEnc guardam o payload cifrado, nunca texto puro).
+model SocialToken {
+  id               String    @id @default(cuid())
+  socialAccountId  String    @unique
+  accessTokenEnc   String
+  refreshTokenEnc  String?
+  scope            String?
+  expiresAt        DateTime?
+  updatedAt        DateTime  @updatedAt
+
+  socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+}
+
+model Media {
+  id          String    @id @default(cuid())
+  workspaceId String
+  type        MediaType
+  url         String
+  thumbnailUrl String?
+  fileName    String
+  sizeBytes   Int
+  folder      String?
+  tags        String[]
+  createdAt   DateTime  @default(now())
+
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  postMedia  PostMedia[]
+
+  @@index([workspaceId])
+}
+
+model Post {
+  id          String     @id @default(cuid())
+  workspaceId String
+  authorId    String
+  content     String
+  status      PostStatus @default(DRAFT)
+  scheduledAt DateTime?
+  timezone    String     @default("America/Sao_Paulo")
+  idempotencyKey String  @unique @default(cuid())
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  media     PostMedia[]
+  platforms PostPlatform[]
+
+  @@index([workspaceId, status])
+  @@index([scheduledAt])
+}
+
+model PostMedia {
+  id      String @id @default(cuid())
+  postId  String
+  mediaId String
+  order   Int    @default(0)
+
+  post  Post  @relation(fields: [postId], references: [id], onDelete: Cascade)
+  media Media @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, mediaId])
+}
+
+// Uma linha por rede selecionada em um post — guarda o texto adaptado
+// por plataforma, o resultado da publicação e o erro específico, se houver.
+model PostPlatform {
+  id              String     @id @default(cuid())
+  postId          String
+  socialAccountId String
+  platform        SocialPlatform
+  content         String? // override de texto específico da rede, se aplicável
+  status          PostStatus @default(SCHEDULED)
+  publishedAt     DateTime?
+  externalPostId  String?
+  errorMessage    String?
+  retryCount      Int        @default(0)
+
+  post          Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
+  socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, socialAccountId])
+  @@index([status])
+}
+
+model Schedule {
+  id        String   @id @default(cuid())
+  postId    String   @unique
+  runAt     DateTime
+  timezone  String
+  jobId     String? // referência ao job no BullMQ
+  createdAt DateTime @default(now())
+
+  @@index([runAt])
+}
+
+model Analytics {
+  id              String   @id @default(cuid())
+  socialAccountId String
+  date            DateTime
+  impressions     Int      @default(0)
+  reach           Int      @default(0)
+  likes           Int      @default(0)
+  comments        Int      @default(0)
+  shares          Int      @default(0)
+  clicks          Int      @default(0)
+  followerDelta   Int      @default(0)
+
+  socialAccount SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([socialAccountId, date])
+  @@index([date])
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  workspaceId String
+  userId      String?
+  type        NotificationType
+  message     String
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, readAt])
+}
+
+model Plan {
+  id                  String   @id @default(cuid())
+  tier                PlanTier @unique
+  name                String
+  priceMonthlyCents   Int
+  maxSocialAccounts   Int
+  maxScheduledPosts   Int
+  maxUsers            Int
+  storageMb           Int
+  analyticsHistoryDays Int
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id          String   @id @default(cuid())
+  workspaceId String   @unique
+  planId      String
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  currentPeriodEnd     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  plan      Plan      @relation(fields: [planId], references: [id])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String?
+  action      String
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+}
