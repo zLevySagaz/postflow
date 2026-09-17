@@ -1,5 +1,6 @@
 "use client";
 export const dynamic = 'force-dynamic';
+import { Suspense } from 'react'
 import { useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAppStore } from "@/context/app-store";
@@ -8,7 +9,7 @@ import { AccountCard } from "@/components/accounts/account-card";
 import { PLATFORM_META } from "@/integrations/platform-limits";
 import type { SocialPlatform } from "@/lib/types";
 
-export default function AccountsPage() {
+function AccountsContent() {
   const { accounts, reconnectAccount, disconnectAccount } = useAppStore();
   const { show } = useToast();
   const router = useRouter();
@@ -66,3 +67,12 @@ export default function AccountsPage() {
     </div>
   );
 }
+function Page() {
+  return (
+     <Suspense fallback={<div>Carregando...</div>}>
+      <AccountsContent />
+    </Suspense>
+  );
+}
+
+export default Page;
